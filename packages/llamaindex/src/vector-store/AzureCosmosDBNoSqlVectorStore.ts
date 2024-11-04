@@ -1,13 +1,24 @@
-import { CosmosClient, Container, type VectorEmbeddingPolicy, type IndexingPolicy, type DatabaseRequest, type ContainerRequest, type CosmosClientOptions, VectorEmbeddingDataType, VectorEmbeddingDistanceFunction, VectorIndexType, type VectorIndex } from "@azure/cosmos";
+import {
+  Container,
+  CosmosClient,
+  VectorEmbeddingDataType,
+  VectorEmbeddingDistanceFunction,
+  VectorIndexType,
+  type ContainerRequest,
+  type CosmosClientOptions,
+  type DatabaseRequest,
+  type IndexingPolicy,
+  type VectorEmbeddingPolicy,
+  type VectorIndex,
+} from "@azure/cosmos";
 import { DefaultAzureCredential, type TokenCredential } from "@azure/identity";
-import type { BaseEmbedding } from "@llamaindex/core/embeddings";
+import { BaseNode, MetadataMode } from "@llamaindex/core/schema";
 import { getEnv } from "@llamaindex/env";
 import { metadataDictToNode, nodeToMetadata } from "./utils.js";
-import { BaseNode, MetadataMode } from "@llamaindex/core/schema";
 
 import {
-  VectorStoreBase,
-  type VectorStoreNoEmbedModel,
+  BaseVectorStore,
+  type VectorStoreBaseParams,
   type VectorStoreQuery,
   type VectorStoreQueryResult,
 } from "./types.js";
@@ -24,8 +35,12 @@ export type AzureCosmosDBNoSqlCreateContainerOptions = Partial<
 export interface AzureCosmosDBNoSQLInitOptions {
   readonly vectorEmbeddingPolicy?: VectorEmbeddingPolicy | undefined;
   readonly indexingPolicy?: IndexingPolicy | undefined;
-  readonly createContainerOptions?: AzureCosmosDBNoSqlCreateContainerOptions | undefined;
-  readonly createDatabaseOptions?: AzureCosmosDBNoSqlCreateDatabaseOptions | undefined;
+  readonly createContainerOptions?:
+    | AzureCosmosDBNoSqlCreateContainerOptions
+    | undefined;
+  readonly createDatabaseOptions?:
+    | AzureCosmosDBNoSqlCreateDatabaseOptions
+    | undefined;
 }
 
 /**
@@ -48,40 +63,47 @@ export interface AzureCosmosDBNoSQLConfig
 const USER_AGENT_PREFIX = "LlamaIndex-CDBNoSQL-VectorStore-JavaScript";
 
 const DEFAULT_VECTOR_EMBEDDING_POLICY = {
-  vectorEmbeddings: [{
-    path: "/embedding",
-    dataType: VectorEmbeddingDataType.Float32,
-    distanceFunction: VectorEmbeddingDistanceFunction.Cosine,
-    dimensions: 1536,
-  }]
-}
+  vectorEmbeddings: [
+    {
+      path: "/embedding",
+      dataType: VectorEmbeddingDataType.Float32,
+      distanceFunction: VectorEmbeddingDistanceFunction.Cosine,
+      dimensions: 1536,
+    },
+  ],
+};
 
-const DEFAULT_VECTOR_INDEXING_POLICY: VectorIndex[] = [{ path: "/embedding", type: VectorIndexType.QuantizedFlat }];
+const DEFAULT_VECTOR_INDEXING_POLICY: VectorIndex[] = [
+  { path: "/embedding", type: VectorIndexType.QuantizedFlat },
+];
 
-function parseConnectionString(connectionString: string): { endpoint: string, key: string } {
-  const parts = connectionString.split(';');
-  let endpoint = '';
-  let accountKey = '';
+function parseConnectionString(connectionString: string): {
+  endpoint: string;
+  key: string;
+} {
+  const parts = connectionString.split(";");
+  let endpoint = "";
+  let accountKey = "";
 
-  parts.forEach(part => {
-    const [key, value] = part.split('=');
-    if (key && key.trim() === 'AccountEndpoint') {
-      endpoint = value?.trim() ?? '';
-    } else if ((key ?? '').trim() === 'AccountKey') {
-      accountKey = value?.trim() ?? '';
+  parts.forEach((part) => {
+    const [key, value] = part.split("=");
+    if (key && key.trim() === "AccountEndpoint") {
+      endpoint = value?.trim() ?? "";
+    } else if ((key ?? "").trim() === "AccountKey") {
+      accountKey = value?.trim() ?? "";
     }
   });
 
   if (!endpoint || !accountKey) {
-    throw new Error('Invalid connection string: missing AccountEndpoint or AccountKey.');
+    throw new Error(
+      "Invalid connection string: missing AccountEndpoint or AccountKey.",
+    );
   }
 
   return { endpoint, key: accountKey };
 }
 
-export class AzureCosmosDBNoSqlVectorStore
-  extends VectorStoreBase
-  implements VectorStoreNoEmbedModel {
+export class AzureCosmosDBNoSqlVectorStore extends BaseVectorStore {
   storesText: boolean = true;
 
   private initPromise?: Promise<void>;
@@ -115,29 +137,27 @@ export class AzureCosmosDBNoSqlVectorStore
   /**
    * The key to use for the vector embedding field in the CosmosDB container.
    * Default: "embedding"
-  */
+   */
   embeddingKey: string;
 
   private initialize: () => Promise<void>;
 
-  get client(): any {
+  client(): unknown {
     return this.cosmosClient;
   }
 
-  constructor(dbConfig: AzureCosmosDBNoSQLConfig,
-    embedModel?: BaseEmbedding) {
-    super(embedModel);
+  constructor(dbConfig: AzureCosmosDBNoSQLConfig & VectorStoreBaseParams) {
+    super(dbConfig);
     const connectionString =
       dbConfig.connectionString ??
       getEnv("AZURE_COSMOSDB_NOSQL_CONNECTION_STRING");
 
     const endpoint =
-      dbConfig.endpoint ??
-      getEnv("AZURE_COSMOSDB_NOSQL_ENDPOINT");
+      dbConfig.endpoint ?? getEnv("AZURE_COSMOSDB_NOSQL_ENDPOINT");
 
     if (!dbConfig.client && !connectionString && !endpoint) {
       throw new Error(
-        "AzureCosmosDBNoSQLVectorStore client, connection string or endpoint must be set."
+        "CosmosDB client, connection string or endpoint must be set in the configuration.",
       );
     }
 
@@ -149,7 +169,6 @@ export class AzureCosmosDBNoSqlVectorStore
           key,
           userAgentSuffix: USER_AGENT_PREFIX,
         } as CosmosClientOptions);
-
       } else {
         // Use managed identity
         this.cosmosClient = new CosmosClient({
@@ -158,8 +177,7 @@ export class AzureCosmosDBNoSqlVectorStore
           userAgentSuffix: USER_AGENT_PREFIX,
         } as CosmosClientOptions);
       }
-    }
-    else {
+    } else {
       this.cosmosClient = dbConfig.client;
     }
 
@@ -170,14 +188,18 @@ export class AzureCosmosDBNoSqlVectorStore
     this.textKey = dbConfig.textKey ?? "text";
     this.flatMetadata = dbConfig.flatMetadata ?? true;
     this.metadataKey = dbConfig.metadataKey ?? "metadata";
-    const vectorEmbeddingPolicy = dbConfig.vectorEmbeddingPolicy ?? DEFAULT_VECTOR_EMBEDDING_POLICY;
-    const indexingPolicy: IndexingPolicy = dbConfig.indexingPolicy ?? { vectorIndexes: DEFAULT_VECTOR_INDEXING_POLICY };
+    const vectorEmbeddingPolicy =
+      dbConfig.vectorEmbeddingPolicy ?? DEFAULT_VECTOR_EMBEDDING_POLICY;
+    const indexingPolicy: IndexingPolicy = dbConfig.indexingPolicy ?? {
+      vectorIndexes: DEFAULT_VECTOR_INDEXING_POLICY,
+    };
 
-    this.embeddingKey = vectorEmbeddingPolicy.vectorEmbeddings?.[0]?.path?.slice(1) ?? '';
+    this.embeddingKey =
+      vectorEmbeddingPolicy.vectorEmbeddings?.[0]?.path?.slice(1) ?? "";
 
     if (!this.embeddingKey) {
       throw new Error(
-        "AzureCosmosDBNoSQLVectorStore requires a valid vectorEmbeddings path"
+        "AzureCosmosDBNoSQLVectorStore requires a valid vectorEmbeddings path",
       );
     }
 
@@ -192,7 +214,7 @@ export class AzureCosmosDBNoSqlVectorStore
         }).catch((error) => {
           console.error(
             "Error during AzureCosmosDBNoSQLVectorStore initialization",
-            error
+            error,
           );
         });
       }
@@ -229,18 +251,17 @@ export class AzureCosmosDBNoSqlVectorStore
 
     const ids: string[] = [];
     const results = await Promise.allSettled(
-      docs.map((doc) => this.container.items.create(doc))
+      docs.map((doc) => this.container.items.create(doc)),
     );
     for (const result of results) {
-      if (result.status === 'fulfilled') {
-        ids.push(result.value.resource?.id ?? '');
-      }
-      else {
-        ids.push('error: could not create item');
+      if (result.status === "fulfilled") {
+        ids.push(result.value.resource?.id ?? "");
+      } else {
+        ids.push("error: could not create item");
       }
     }
     return ids;
-  };
+  }
 
   /**
    * Delete a document from the CosmosDB container.
@@ -249,10 +270,10 @@ export class AzureCosmosDBNoSqlVectorStore
    * @param deleteOptions - Any options to pass to the container.item.delete function
    * @returns Promise that resolves if the delete query did not throw an error.
    */
-  async delete(refDocId: string, deleteOptions?: any): Promise<void> {
+  async delete(refDocId: string, deleteOptions?: object): Promise<void> {
     await this.initialize();
     await this.container.item(refDocId).delete(deleteOptions);
-  };
+  }
 
   /**
    * Performs a vector similarity search query in the CosmosDB container.
@@ -262,28 +283,31 @@ export class AzureCosmosDBNoSqlVectorStore
    */
   async query(
     query: VectorStoreQuery,
-    options?: any,
+    options?: object,
   ): Promise<VectorStoreQueryResult> {
     await this.initialize();
     const params = {
       vector: query.queryEmbedding!,
       k: query.similarityTopK,
-    }
+    };
 
     const nodes: BaseNode[] = [];
     const ids: string[] = [];
     const similarities: number[] = [];
-    const queryResults = await this.container.items.query({
-      query: "SELECT TOP @k c[@id] as id, c[@text] as text, c[@metadata] as metadata, VectorDistance(c[@embeddingKey],@embedding) AS SimilarityScore FROM c ORDER BY VectorDistance(c[@embeddingKey],@embedding)",
-      parameters: [
-        { name: "@k", value: params.k },
-        { name: "@id", value: this.idKey },
-        { name: "@text", value: this.textKey },
-        { name: "@metadata", value: this.metadataKey },
-        { name: "@embedding", value: params.vector },
-        { name: "@embeddingKey", value: this.embeddingKey },
-      ],
-    }).fetchAll();
+    const queryResults = await this.container.items
+      .query({
+        query:
+          "SELECT TOP @k c[@id] as id, c[@text] as text, c[@metadata] as metadata, VectorDistance(c[@embeddingKey],@embedding) AS SimilarityScore FROM c ORDER BY VectorDistance(c[@embeddingKey],@embedding)",
+        parameters: [
+          { name: "@k", value: params.k },
+          { name: "@id", value: this.idKey },
+          { name: "@text", value: this.textKey },
+          { name: "@metadata", value: this.metadataKey },
+          { name: "@embedding", value: params.vector },
+          { name: "@embeddingKey", value: this.embeddingKey },
+        ],
+      })
+      .fetchAll();
 
     for (const item of queryResults.resources) {
       const node = metadataDictToNode(item["metadata"], {
@@ -294,11 +318,11 @@ export class AzureCosmosDBNoSqlVectorStore
         },
       });
       node.setContent(item["text"]);
-      const node_id = item["id"];
-      const node_score = item["SimilarityScore"];
+      const nodeId = item["id"];
+      const nodeScore = item["SimilarityScore"];
       nodes.push(node);
-      ids.push(node_id);
-      similarities.push(node_score);
+      ids.push(nodeId);
+      similarities.push(nodeScore);
     }
 
     const result = {
@@ -307,7 +331,7 @@ export class AzureCosmosDBNoSqlVectorStore
       ids,
     };
     return result;
-  };
+  }
 
   /**
    * Initialize the CosmosDB container.
@@ -316,7 +340,7 @@ export class AzureCosmosDBNoSqlVectorStore
     client: CosmosClient,
     databaseName: string,
     containerName: string,
-    initOptions: AzureCosmosDBNoSQLInitOptions
+    initOptions: AzureCosmosDBNoSQLInitOptions,
   ): Promise<void> {
     const { database } = await client.databases.createIfNotExists({
       ...(initOptions?.createDatabaseOptions ?? {}),
@@ -324,9 +348,14 @@ export class AzureCosmosDBNoSqlVectorStore
     });
 
     const { container } = await database.containers.createIfNotExists({
-      ...(initOptions?.createContainerOptions ?? { partitionKey: { paths: ["/id"] } }),
-      indexingPolicy: initOptions.indexingPolicy || { vectorIndexes: DEFAULT_VECTOR_INDEXING_POLICY },
-      vectorEmbeddingPolicy: initOptions?.vectorEmbeddingPolicy || DEFAULT_VECTOR_EMBEDDING_POLICY,
+      ...(initOptions?.createContainerOptions ?? {
+        partitionKey: { paths: ["/id"] },
+      }),
+      indexingPolicy: initOptions.indexingPolicy || {
+        vectorIndexes: DEFAULT_VECTOR_INDEXING_POLICY,
+      },
+      vectorEmbeddingPolicy:
+        initOptions?.vectorEmbeddingPolicy || DEFAULT_VECTOR_EMBEDDING_POLICY,
       id: containerName,
     });
     this.container = container;
